@@ -2,13 +2,16 @@ package tollbooth
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/didip/tollbooth/v8/errors"
 	"github.com/didip/tollbooth/v8/limiter"
 )
 
@@ -23,12 +26,145 @@ func TestLimitByKeys(t *testing.T) {
 	httperror = LimitByKeys(lmt, []string{"127.0.0.1", "/"})
 	if httperror == nil {
 		t.Errorf("Second time count should return error because it exceeds 1 request per second.")
+	} else if httperror.Reason != errors.ReasonKey {
+		t.Errorf("Second request should be rejected by the per-key limiter, got reason %q", httperror.Reason)
 	}
 
 	<-time.After(1 * time.Second)
 	httperror = LimitByKeys(lmt, []string{"127.0.0.1", "/"})
 	if httperror != nil {
 		t.Errorf("Third time count should not return error because the 1 second window has passed.")
+	}
+}
+
+func TestGlobalLimitAcrossConcurrentKeys(t *testing.T) {
+	lmt := NewLimiter(1000, nil).
+		SetGlobalMax(0.001).
+		SetGlobalBurst(5)
+
+	const requests = 200
+	start := make(chan struct{})
+	errs := make(chan *errors.HTTPError, requests)
+	var allowed atomic.Int64
+	var rejectedGlobal atomic.Int64
+	var wg sync.WaitGroup
+
+	wg.Add(requests)
+	for i := 0; i < requests; i++ {
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			httpError := LimitByKeys(lmt, []string{fmt.Sprintf("key-%d", i)})
+			if httpError == nil {
+				allowed.Add(1)
+				return
+			}
+			errs <- httpError
+			if httpError.Reason == errors.ReasonGlobal {
+				rejectedGlobal.Add(1)
+			}
+		}(i)
+	}
+
+	close(start)
+	wg.Wait()
+	close(errs)
+
+	if got := allowed.Load(); got != 5 {
+		t.Fatalf("global limiter admitted %d requests across different keys, want exactly 5", got)
+	}
+	if got := rejectedGlobal.Load(); got != requests-5 {
+		t.Fatalf("global limiter rejected %d requests, want %d", got, requests-5)
+	}
+	for httpError := range errs {
+		if httpError.Reason != errors.ReasonGlobal {
+			t.Errorf("different keys should be rejected by the global limiter, got reason %q", httpError.Reason)
+		}
+	}
+}
+
+func TestPerKeyAndGlobalLimitsBothApply(t *testing.T) {
+	lmt := NewLimiter(1, nil).
+		SetGlobalMax(0.001).
+		SetGlobalBurst(3)
+
+	if err := LimitByKeys(lmt, []string{"key-a"}); err != nil {
+		t.Fatalf("first request for key-a should pass, got %v", err)
+	}
+	err := LimitByKeys(lmt, []string{"key-a"})
+	if err == nil || err.Reason != errors.ReasonKey {
+		t.Fatalf("second request for key-a should be rejected by its key bucket, got %+v", err)
+	}
+
+	if err := LimitByKeys(lmt, []string{"key-b"}); err != nil {
+		t.Fatalf("request for key-b should pass, got %v", err)
+	}
+	if err := LimitByKeys(lmt, []string{"key-c"}); err != nil {
+		t.Fatalf("request for key-c should pass, got %v", err)
+	}
+
+	err = LimitByKeys(lmt, []string{"key-d"})
+	if err == nil || err.Reason != errors.ReasonGlobal {
+		t.Fatalf("request for key-d should be rejected by the global limit, got %+v", err)
+	}
+}
+
+func TestGlobalLimitRejectionReasonHeader(t *testing.T) {
+	lmt := NewLimiter(100, nil).
+		SetIPLookup(limiter.IPLookup{Name: "X-Real-IP"}).
+		SetGlobalMax(0.001).
+		SetGlobalBurst(1)
+
+	handler := HTTPMiddleware(lmt)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	first := httptest.NewRecorder()
+	firstRequest := httptest.NewRequest(http.MethodGet, "/", nil)
+	firstRequest.Header.Set("X-Real-IP", "192.0.2.1")
+	handler.ServeHTTP(first, firstRequest)
+	if first.Code != http.StatusOK {
+		t.Fatalf("first request returned %d, want %d", first.Code, http.StatusOK)
+	}
+
+	second := httptest.NewRecorder()
+	secondRequest := httptest.NewRequest(http.MethodGet, "/", nil)
+	secondRequest.Header.Set("X-Real-IP", "192.0.2.2")
+	handler.ServeHTTP(second, secondRequest)
+	if second.Code != http.StatusTooManyRequests {
+		t.Fatalf("second request returned %d, want %d", second.Code, http.StatusTooManyRequests)
+	}
+	if got := second.Header().Get(RateLimitReasonHeader); got != string(errors.ReasonGlobal) {
+		t.Errorf("%s returned %q, want %q", RateLimitReasonHeader, got, errors.ReasonGlobal)
+	}
+}
+
+func TestGlobalLimitConsumedOncePerHTTPRequest(t *testing.T) {
+	lmt := NewLimiter(100, nil).
+		SetIPLookup(limiter.IPLookup{Name: "X-Real-IP"}).
+		SetGlobalMax(0.001).
+		SetGlobalBurst(2)
+
+	handler := HTTPMiddleware(lmt)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	for _, ip := range []string{"192.0.2.10", "192.0.2.11"} {
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodGet, "/", nil)
+		request.Header.Set("X-Real-IP", ip)
+		handler.ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("request from %s returned %d, want %d", ip, recorder.Code, http.StatusOK)
+		}
+	}
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/", nil)
+	request.Header.Set("X-Real-IP", "192.0.2.12")
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusTooManyRequests {
+		t.Fatalf("third request returned %d, want %d", recorder.Code, http.StatusTooManyRequests)
 	}
 }
 

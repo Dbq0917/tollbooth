@@ -2,12 +2,15 @@
 package limiter
 
 import (
+	"math"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	cache "github.com/go-pkgz/expirable-cache/v3"
 
+	tbErrors "github.com/didip/tollbooth/v8/errors"
 	"github.com/didip/tollbooth/v8/internal/time/rate"
 )
 
@@ -39,6 +42,13 @@ func New(generalExpirableOptions *ExpirableOptions) *Limiter {
 
 	lmt.basicAuthUsers = cache.NewCache[string, bool]().WithTTL(lmt.generalExpirableOptions.DefaultExpirationTTL)
 
+	if lmt.generalExpirableOptions.GlobalMax > 0 {
+		if lmt.generalExpirableOptions.GlobalBurst > 0 {
+			lmt.SetGlobalBurst(lmt.generalExpirableOptions.GlobalBurst)
+		}
+		lmt.SetGlobalMax(lmt.generalExpirableOptions.GlobalMax)
+	}
+
 	return lmt
 }
 
@@ -52,6 +62,87 @@ type IPLookup struct {
 	// The index position to pick the ip address from a comma separated list.
 	// The index goes from right to left.
 	IndexFromRight int
+}
+
+type globalLimitConfig struct {
+	max           float64
+	burst         int
+	burstExplicit bool
+	bucket        *globalLimitBucket
+}
+
+// globalLimitBucket is a lock-free GCRA bucket. Each decision uses one atomic
+// compare-and-swap, so unrelated keys do not contend on the Limiter mutex.
+type globalLimitBucket struct {
+	emissionInterval int64
+	burst            int
+	tat              atomic.Int64
+}
+
+func newGlobalLimitBucket(max float64, burst int) *globalLimitBucket {
+	if burst < 1 {
+		burst = 1
+	}
+
+	interval := int64(float64(time.Second) / max)
+	if interval < 1 {
+		interval = 1
+	}
+
+	return &globalLimitBucket{
+		emissionInterval: interval,
+		burst:            burst,
+	}
+}
+
+func defaultGlobalBurst(max float64) int {
+	if max <= 0 {
+		return 1
+	}
+	return int(math.Max(1, math.Ceil(max)))
+}
+
+func (b *globalLimitBucket) allow(now int64) (bool, int) {
+	tolerance := float64(b.emissionInterval) * float64(b.burst)
+
+	for {
+		tat := b.tat.Load()
+		base := now
+		if tat > base {
+			base = tat
+		}
+		if base > math.MaxInt64-b.emissionInterval {
+			return false, 0
+		}
+
+		next := base + b.emissionInterval
+		delay := float64(next - now)
+		if delay > tolerance {
+			return false, 0
+		}
+
+		if b.tat.CompareAndSwap(tat, next) {
+			remaining := int((tolerance - delay) / float64(b.emissionInterval))
+			if remaining < 0 {
+				remaining = 0
+			}
+			return true, remaining
+		}
+	}
+}
+
+func (b *globalLimitBucket) tokensAt(now int64) int {
+	tat := b.tat.Load()
+	if tat <= now {
+		return b.burst
+	}
+
+	used := float64(tat-now) / float64(b.emissionInterval)
+	remaining := b.burst - int(math.Ceil(used))
+	if remaining < 0 {
+		return 0
+	}
+	return remaining
 }
 
 // Limiter is a config struct to limit a particular request handler.
@@ -102,6 +193,10 @@ type Limiter struct {
 
 	// Map of limiters with TTL
 	tokenBuckets cache.Cache[string, *rate.Limiter]
+
+	// Aggregate limiter shared by every key. A nil or disabled config means
+	// only per-key limits apply.
+	globalLimit atomic.Pointer[globalLimitConfig]
 
 	// Ignore URL on the rate limiter keys
 	ignoreURL bool
@@ -209,6 +304,141 @@ func (l *Limiter) GetBurst() int {
 	defer l.RUnlock()
 
 	return l.burst
+}
+
+// SetGlobalMax sets the aggregate request rate shared by all keys. A value
+// less than or equal to zero disables the global limiter.
+func (l *Limiter) SetGlobalMax(max float64) *Limiter {
+	current := l.globalLimit.Load()
+	burst := defaultGlobalBurst(max)
+	burstExplicit := false
+	if current != nil && current.burstExplicit {
+		burst = current.burst
+		burstExplicit = true
+	}
+
+	config := &globalLimitConfig{
+		max:           max,
+		burst:         burst,
+		burstExplicit: burstExplicit,
+	}
+	if max > 0 {
+		config.bucket = newGlobalLimitBucket(max, burst)
+	}
+	l.globalLimit.Store(config)
+
+	return l
+}
+
+// GetGlobalMax returns the aggregate request rate shared by all keys.
+func (l *Limiter) GetGlobalMax() float64 {
+	config := l.globalLimit.Load()
+	if config == nil || config.max <= 0 {
+		return 0
+	}
+	return config.max
+}
+
+// SetGlobalBurst sets how many requests the aggregate limiter can admit at
+// once. A non-positive value derives the burst from the global max. It is safe
+// to call before SetGlobalMax.
+func (l *Limiter) SetGlobalBurst(burst int) *Limiter {
+	current := l.globalLimit.Load()
+	max := 0.0
+	if current != nil {
+		max = current.max
+	}
+
+	burstExplicit := burst > 0
+	if !burstExplicit {
+		burst = defaultGlobalBurst(max)
+	}
+
+	config := &globalLimitConfig{
+		max:           max,
+		burst:         burst,
+		burstExplicit: burstExplicit,
+	}
+	if max > 0 {
+		config.bucket = newGlobalLimitBucket(max, burst)
+	}
+	l.globalLimit.Store(config)
+
+	return l
+}
+
+// GetGlobalBurst returns the aggregate limiter burst size.
+func (l *Limiter) GetGlobalBurst() int {
+	config := l.globalLimit.Load()
+	if config == nil {
+		return 0
+	}
+	return config.burst
+}
+
+// GlobalLimitEnabled reports whether an aggregate limit is configured.
+func (l *Limiter) GlobalLimitEnabled() bool {
+	config := l.globalLimit.Load()
+	return config != nil && config.max > 0 && config.bucket != nil
+}
+
+// GlobalLimitReached consumes one token from the aggregate limiter and reports
+// whether the global limit was reached.
+func (l *Limiter) GlobalLimitReached() bool {
+	reached, _ := l.GlobalLimitReachedAndTokens()
+	return reached
+}
+
+// GlobalLimitReachedAndTokens consumes one token from the aggregate limiter and
+// returns both whether it was reached and the approximate remaining capacity.
+func (l *Limiter) GlobalLimitReachedAndTokens() (bool, int) {
+	config := l.globalLimit.Load()
+	if config == nil || config.max <= 0 || config.bucket == nil {
+		return false, 0
+	}
+
+	allowed, remaining := config.bucket.allow(time.Now().UnixNano())
+	return !allowed, remaining
+}
+
+// GlobalTokens returns the approximate number of tokens left in the aggregate
+// limiter without consuming one.
+func (l *Limiter) GlobalTokens() int {
+	config := l.globalLimit.Load()
+	if config == nil || config.max <= 0 || config.bucket == nil {
+		return 0
+	}
+	return config.bucket.tokensAt(time.Now().UnixNano())
+}
+
+// SetGlobalLimit is an alias for SetGlobalMax.
+func (l *Limiter) SetGlobalLimit(max float64) *Limiter {
+	return l.SetGlobalMax(max)
+}
+
+// GetGlobalLimit is an alias for GetGlobalMax.
+func (l *Limiter) GetGlobalLimit() float64 {
+	return l.GetGlobalMax()
+}
+
+// SetTotalMax is an alias for SetGlobalMax.
+func (l *Limiter) SetTotalMax(max float64) *Limiter {
+	return l.SetGlobalMax(max)
+}
+
+// GetTotalMax is an alias for GetGlobalMax.
+func (l *Limiter) GetTotalMax() float64 {
+	return l.GetGlobalMax()
+}
+
+// SetAggregateMax is an alias for SetGlobalMax.
+func (l *Limiter) SetAggregateMax(max float64) *Limiter {
+	return l.SetGlobalMax(max)
+}
+
+// GetAggregateMax is an alias for GetGlobalMax.
+func (l *Limiter) GetAggregateMax() float64 {
+	return l.GetGlobalMax()
 }
 
 // SetMessage is thread-safe way of setting HTTP message when limit is reached.
@@ -580,37 +810,85 @@ func (l *Limiter) RemoveContextValuesEntries(contextValue string, entriesForRemo
 	return l
 }
 
-func (l *Limiter) limitReachedWithTokenBucketTTL(key string, tokenBucketTTL time.Duration) bool {
-	lmtMax := l.GetMax()
-	lmtBurst := l.GetBurst()
-	l.Lock()
-	defer l.Unlock()
+func (l *Limiter) allowWithTokenBucketTTL(key string, tokenBucketTTL time.Duration) (bool, int) {
+	l.RLock()
+	lmtMax := l.max
+	lmtBurst := l.burst
+	l.RUnlock()
 
-	if _, found := l.tokenBuckets.Get(key); !found {
-		l.tokenBuckets.Set(
-			key,
-			rate.NewLimiter(rate.Limit(lmtMax), lmtBurst),
-			tokenBucketTTL,
-		)
-	}
-
-	expiringMap, found := l.tokenBuckets.Get(key)
+	tokenBucket, found := l.tokenBuckets.Get(key)
 	if !found {
-		return false
+		tokenBucket = rate.NewLimiter(rate.Limit(lmtMax), lmtBurst)
+		l.tokenBuckets.Set(key, tokenBucket, tokenBucketTTL)
+		// Another request may have initialized the same key first. Always use
+		// the bucket stored in the cache so concurrent misses share one bucket.
+		if stored, ok := l.tokenBuckets.Get(key); ok {
+			tokenBucket = stored
+		}
 	}
 
-	return !expiringMap.Allow()
+	now := time.Now()
+	allowed := tokenBucket.AllowN(now, 1)
+	tokens := int(tokenBucket.TokensAt(now))
+	return !allowed, tokens
 }
 
-// LimitReached returns a bool indicating if the Bucket identified by key ran out of tokens.
-func (l *Limiter) LimitReached(key string) bool {
+func (l *Limiter) tokenBucketTTL() time.Duration {
 	ttl := l.GetTokenBucketExpirationTTL()
 
 	if ttl <= 0 {
 		ttl = l.generalExpirableOptions.DefaultExpirationTTL
 	}
 
-	return l.limitReachedWithTokenBucketTTL(key, ttl)
+	return ttl
+}
+
+// LimitReached reports whether either the per-key or aggregate limit is exhausted.
+func (l *Limiter) LimitReached(key string) bool {
+	limitReached, _, _ := l.LimitReachedWithReasonAndTokens(key)
+	return limitReached
+}
+
+// KeyLimitReachedAndTokens reports whether the per-key bucket is exhausted and
+// returns the remaining tokens from the same calculation. It does not consume
+// aggregate capacity.
+func (l *Limiter) KeyLimitReachedAndTokens(key string) (bool, int) {
+	return l.allowWithTokenBucketTTL(key, l.tokenBucketTTL())
+}
+
+// LimitReachedAndTokens reports whether either configured limit is exhausted
+// and returns the remaining per-key tokens from the same calculation.
+func (l *Limiter) LimitReachedAndTokens(key string) (bool, int) {
+	limitReached, tokens, _ := l.LimitReachedWithReasonAndTokens(key)
+	return limitReached, tokens
+}
+
+// AllowAndTokens is an alias for LimitReachedAndTokens.
+func (l *Limiter) AllowAndTokens(key string) (bool, int) {
+	return l.LimitReachedAndTokens(key)
+}
+
+// LimitReachedWithReason reports whether either configured limit is exhausted
+// and identifies the rejecting layer.
+func (l *Limiter) LimitReachedWithReason(key string) (bool, tbErrors.LimitReason) {
+	limitReached, _, reason := l.LimitReachedWithReasonAndTokens(key)
+	return limitReached, reason
+}
+
+// LimitReachedWithReasonAndTokens checks the per-key limit first and then the
+// aggregate limit. It returns the reason for a rejection, or an empty reason
+// when the request is allowed.
+func (l *Limiter) LimitReachedWithReasonAndTokens(key string) (bool, int, tbErrors.LimitReason) {
+	limitReached, tokens := l.KeyLimitReachedAndTokens(key)
+	if limitReached {
+		return true, 0, tbErrors.ReasonKey
+	}
+
+	if l.GlobalLimitReached() {
+		return true, 0, tbErrors.ReasonGlobal
+	}
+
+	return false, tokens, ""
 }
 
 // Tokens returns current amount of tokens left in the Bucket identified by key.

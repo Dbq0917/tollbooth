@@ -143,7 +143,37 @@ func main() {
     lmt.SetHeaderEntryExpirationTTL(time.Hour)
     ```
 
-4. Upon rejection, the following HTTP response headers are available to users:
+4. Add an aggregate limit shared by every key.
+
+    ```go
+    import (
+        "github.com/didip/tollbooth/v8"
+        "github.com/didip/tollbooth/v8/limiter"
+    )
+
+    lmt := tollbooth.NewLimiter(10, nil)
+
+    // Per-key limits remain active. In addition, all keys together may use at
+    // most 100 requests/second, with at most 100 requests admitted at once.
+    lmt.SetGlobalMax(100).SetGlobalBurst(100)
+
+    // A zero global max disables the aggregate limiter.
+    // lmt.SetGlobalMax(0)
+
+    // The global limiter can also be configured at construction time.
+    lmt = tollbooth.NewLimiter(10, &limiter.ExpirableOptions{
+        GlobalMax:   100,
+        GlobalBurst: 100,
+    })
+    ```
+
+    A rejected `errors.HTTPError` reports the layer in `Reason`, using
+    `errors.ReasonKey` or `errors.ReasonGlobal`. HTTP responses also include
+    `X-Rate-Limit-Reason` with the same value. The aggregate limiter uses
+    lock-free atomic accounting, so independent requests do not serialize on
+    the limiter's mutex.
+
+5. Upon rejection, the following HTTP response headers are available to users:
 
     * `X-Rate-Limit-Limit` The maximum request limit.
 
@@ -161,7 +191,7 @@ func main() {
 
    * `RateLimit-Remaining` The remaining tokens.
 
-5. Customize your own message or function when limit is reached.
+6. Customize your own message or function when limit is reached.
 
     ```go
     lmt := tollbooth.NewLimiter(1, nil)
@@ -182,7 +212,7 @@ func main() {
     lmt.SetOnLimitReached(func(w http.ResponseWriter, r *http.Request) { fmt.Println("A request was rejected") })
     ```
 
-6. Tollbooth does not require external storage since it uses an algorithm called [Token Bucket](http://en.wikipedia.org/wiki/Token_bucket) [(Go library: golang.org/x/time/rate)](https://godoc.org/golang.org/x/time/rate).
+7. Tollbooth does not require external storage since it uses an algorithm called [Token Bucket](http://en.wikipedia.org/wiki/Token_bucket) [(Go library: golang.org/x/time/rate)](https://godoc.org/golang.org/x/time/rate).
 
 ## Other Web Frameworks
 

@@ -12,10 +12,23 @@ import (
 	"github.com/didip/tollbooth/v8/limiter"
 )
 
+const (
+	// RateLimitReasonHeader identifies whether the per-key or global limiter
+	// rejected a request.
+	RateLimitReasonHeader = "X-Rate-Limit-Reason"
+	// RateLimitGlobalLimitHeader reports the aggregate request limit.
+	RateLimitGlobalLimitHeader = "X-Rate-Limit-Global-Limit"
+	// RateLimitGlobalRemainingHeader reports the approximate aggregate capacity left.
+	RateLimitGlobalRemainingHeader = "X-Rate-Limit-Global-Remaining"
+)
+
 // setResponseHeaders configures X-Rate-Limit-Limit and X-Rate-Limit-Duration
 func setResponseHeaders(lmt *limiter.Limiter, w http.ResponseWriter, r *http.Request) {
 	w.Header().Add("X-Rate-Limit-Limit", fmt.Sprintf("%.2f", lmt.GetMax()))
 	w.Header().Add("X-Rate-Limit-Duration", "1")
+	if lmt.GlobalLimitEnabled() {
+		w.Header().Set(RateLimitGlobalLimitHeader, fmt.Sprintf("%.2f", lmt.GetGlobalMax()))
+	}
 
 	xForwardedFor := r.Header.Get("X-Forwarded-For")
 	if strings.TrimSpace(xForwardedFor) != "" {
@@ -31,6 +44,24 @@ func setRateLimitResponseHeaders(lmt *limiter.Limiter, w http.ResponseWriter, to
 	w.Header().Add("RateLimit-Limit", fmt.Sprintf("%d", int(math.Round(lmt.GetMax()))))
 	w.Header().Add("RateLimit-Reset", "1")
 	w.Header().Add("RateLimit-Remaining", fmt.Sprintf("%d", tokensLeft))
+}
+
+func setGlobalRateLimitResponseHeaders(w http.ResponseWriter, tokensLeft int) {
+	w.Header().Set(RateLimitGlobalRemainingHeader, fmt.Sprintf("%d", tokensLeft))
+}
+
+func setRateLimitReasonHeader(w http.ResponseWriter, reason errors.LimitReason) {
+	if reason != "" {
+		w.Header().Set(RateLimitReasonHeader, string(reason))
+	}
+}
+
+func limitReachedError(lmt *limiter.Limiter, reason errors.LimitReason) *errors.HTTPError {
+	return &errors.HTTPError{
+		Message:    lmt.GetMessage(),
+		StatusCode: lmt.GetStatusCode(),
+		Reason:     reason,
+	}
 }
 
 // NewLimiter is a convenience function to limiter.New.
@@ -50,11 +81,31 @@ func LimitByKeys(lmt *limiter.Limiter, keys []string) *errors.HTTPError {
 // LimitByKeysAndReturn keeps track number of request made by keys separated by pipe.
 // It returns HTTPError when limit is exceeded, and also returns the current limit value.
 func LimitByKeysAndReturn(lmt *limiter.Limiter, keys []string) (*errors.HTTPError, int) {
-	if lmt.LimitReached(strings.Join(keys, "|")) {
-		return &errors.HTTPError{Message: lmt.GetMessage(), StatusCode: lmt.GetStatusCode()}, 0
+	httpError, tokens, _ := LimitByKeysAndReturnWithReason(lmt, keys)
+	return httpError, tokens
+}
+
+func limitByKeysPerKeyAndReturn(lmt *limiter.Limiter, keys []string) (*errors.HTTPError, int) {
+	limitReached, tokens := lmt.KeyLimitReachedAndTokens(strings.Join(keys, "|"))
+	if limitReached {
+		return limitReachedError(lmt, errors.ReasonKey), 0
+	}
+	return nil, tokens
+}
+
+// LimitByKeysAndReturnWithReason checks both the per-key and aggregate limits.
+// It returns the HTTPError, remaining per-key tokens, and the rejecting layer.
+func LimitByKeysAndReturnWithReason(lmt *limiter.Limiter, keys []string) (*errors.HTTPError, int, errors.LimitReason) {
+	httpError, tokens := limitByKeysPerKeyAndReturn(lmt, keys)
+	if httpError != nil {
+		return httpError, tokens, errors.ReasonKey
 	}
 
-	return nil, lmt.Tokens(strings.Join(keys, "|"))
+	if lmt.GlobalLimitReached() {
+		return limitReachedError(lmt, errors.ReasonGlobal), 0, errors.ReasonGlobal
+	}
+
+	return nil, tokens, ""
 }
 
 // ShouldSkipLimiter is a series of filter that decides if request should be limited or not.
@@ -306,12 +357,24 @@ func LimitByRequest(lmt *limiter.Limiter, w http.ResponseWriter, r *http.Request
 
 	// Loop sliceKeys and check if one of them has error.
 	for _, keys := range sliceKeys {
-		httpError, keysLimit := LimitByKeysAndReturn(lmt, keys)
+		httpError, keysLimit := limitByKeysPerKeyAndReturn(lmt, keys)
 		if tokensLeft > keysLimit {
 			tokensLeft = keysLimit
 		}
 		if httpError != nil {
 			setRateLimitResponseHeaders(lmt, w, tokensLeft)
+			setRateLimitReasonHeader(w, httpError.Reason)
+			return httpError
+		}
+	}
+
+	if lmt.GlobalLimitEnabled() {
+		globalReached, globalTokens := lmt.GlobalLimitReachedAndTokens()
+		setGlobalRateLimitResponseHeaders(w, globalTokens)
+		if globalReached {
+			httpError := limitReachedError(lmt, errors.ReasonGlobal)
+			setRateLimitResponseHeaders(lmt, w, tokensLeft)
+			setRateLimitReasonHeader(w, httpError.Reason)
 			return httpError
 		}
 	}
