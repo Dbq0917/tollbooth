@@ -471,6 +471,65 @@ func BenchmarkAllowN(b *testing.B) {
 	})
 }
 
+func TestLimiterWithInitialTokens(t *testing.T) {
+	now := time.Now()
+	lim := NewLimiterWithTokens(10, 5, 3)
+
+	for i := 0; i < 3; i++ {
+		if ok, tokens := lim.AllowNWithTokens(now, 1); !ok || tokens != float64(2-i) {
+			t.Errorf("request %d: ok=%v tokens=%v want ok=true tokens=%d", i+1, ok, tokens, 2-i)
+		}
+	}
+	if ok, _ := lim.AllowNWithTokens(now, 1); ok {
+		t.Error("request after the initial tokens were consumed should be rejected")
+	}
+}
+
+func TestLimiterInitialTokensAreClampedToBurst(t *testing.T) {
+	lim := NewLimiterWithTokens(10, 5, 100)
+	now := time.Now()
+
+	for i := 0; i < 5; i++ {
+		if !lim.AllowN(now, 1) {
+			t.Fatalf("request %d should be allowed by the clamped initial tokens", i+1)
+		}
+	}
+	if lim.AllowN(now, 1) {
+		t.Error("request beyond the burst size should be rejected")
+	}
+}
+
+func TestLimiterRefillInterval(t *testing.T) {
+	const interval = 100 * time.Millisecond
+	lim := NewLimiterWithConfig(10, 5, LimiterConfig{
+		InitialTokens:  5,
+		RefillInterval: interval,
+		RefillTokens:   2,
+	})
+	now := time.Now()
+
+	for i := 0; i < 5; i++ {
+		if !lim.AllowN(now, 1) {
+			t.Fatalf("request %d should be allowed by the initial tokens", i+1)
+		}
+	}
+	if lim.AllowN(now, 1) {
+		t.Fatal("request after consuming the initial tokens should be rejected")
+	}
+	if lim.AllowN(now.Add(interval/2), 1) {
+		t.Error("request before the first refill interval should be rejected")
+	}
+	if !lim.AllowN(now.Add(interval), 1) {
+		t.Error("first request after the refill interval should be allowed")
+	}
+	if !lim.AllowN(now.Add(interval), 1) {
+		t.Error("second request after the refill batch should be allowed")
+	}
+	if lim.AllowN(now.Add(interval), 1) {
+		t.Error("request beyond the refill batch should be rejected")
+	}
+}
+
 func BenchmarkWaitNNoDelay(b *testing.B) {
 	lim := NewLimiter(Limit(b.N), b.N)
 	ctx := context.Background()

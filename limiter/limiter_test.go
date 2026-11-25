@@ -128,3 +128,120 @@ func TestMuchHigherMaxRequestsWithCustomTokenBucketTTL(t *testing.T) {
 	}
 
 }
+
+func TestInitialTokens(t *testing.T) {
+	lmt := New(nil).SetMax(1).SetBurst(5).SetInitialTokens(3)
+	key := "127.0.0.1|/"
+
+	for i := 0; i < 3; i++ {
+		if lmt.LimitReached(key) {
+			t.Errorf("request %d should be allowed by the initial tokens", i+1)
+		}
+	}
+	if !lmt.LimitReached(key) {
+		t.Error("request after consuming the initial tokens should be rejected")
+	}
+}
+
+func TestInitialTokensAreClampedToBurst(t *testing.T) {
+	lmt := New(&ExpirableOptions{InitialTokens: 100}).SetMax(1).SetBurst(5)
+	key := "127.0.0.1|/"
+
+	for i := 0; i < 5; i++ {
+		if lmt.LimitReached(key) {
+			t.Errorf("request %d should be allowed by the clamped initial tokens", i+1)
+		}
+	}
+	if !lmt.LimitReached(key) {
+		t.Error("request beyond the burst size should be rejected")
+	}
+}
+
+func TestRefillInterval(t *testing.T) {
+	const (
+		interval = 75 * time.Millisecond
+		refill   = 2
+	)
+	lmt := New(nil).
+		SetMax(2).
+		SetBurst(4).
+		SetInitialTokens(4).
+		SetRefillInterval(interval).
+		SetRefillTokens(refill)
+	key := "127.0.0.1|/"
+
+	for i := 0; i < 4; i++ {
+		if lmt.LimitReached(key) {
+			t.Fatalf("request %d should be allowed by the initial tokens", i+1)
+		}
+	}
+	if !lmt.LimitReached(key) {
+		t.Fatal("request after consuming the initial tokens should be rejected")
+	}
+
+	time.Sleep(interval / 2)
+	if !lmt.LimitReached(key) {
+		t.Error("request before the first refill interval should be rejected")
+	}
+
+	time.Sleep(interval/2 + 10*time.Millisecond)
+	for i := 0; i < refill; i++ {
+		if lmt.LimitReached(key) {
+			t.Errorf("request %d after the refill interval should be allowed", i+1)
+		}
+	}
+	if !lmt.LimitReached(key) {
+		t.Error("request beyond the refill batch should be rejected")
+	}
+}
+
+func TestInitialTokensAreNotRegrantedToActiveBucket(t *testing.T) {
+	lmt := New(&ExpirableOptions{
+		DefaultExpirationTTL: 25 * time.Millisecond,
+		InitialTokens:        3,
+	}).SetMax(0.1).SetBurst(3)
+	key := "127.0.0.1|/"
+
+	for i := 0; i < 3; i++ {
+		if lmt.LimitReached(key) {
+			t.Fatalf("request %d should be allowed by the initial tokens", i+1)
+		}
+	}
+
+	allowed := 0
+	deadline := time.Now().Add(100 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if !lmt.LimitReached(key) {
+			allowed++
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	if allowed > 0 {
+		t.Errorf("active bucket was re-seeded with initial tokens %d times", allowed)
+	}
+}
+
+func TestInitialTokensAreRegrantedAfterIdleExpiration(t *testing.T) {
+	lmt := New(&ExpirableOptions{
+		DefaultExpirationTTL: 25 * time.Millisecond,
+		InitialTokens:        2,
+	}).SetMax(1).SetBurst(2)
+	key := "127.0.0.1|/"
+
+	for i := 0; i < 2; i++ {
+		if lmt.LimitReached(key) {
+			t.Fatalf("request %d should be allowed by the initial tokens", i+1)
+		}
+	}
+	if !lmt.LimitReached(key) {
+		t.Fatal("request after consuming the initial tokens should be rejected")
+	}
+
+	time.Sleep(40 * time.Millisecond)
+	for i := 0; i < 2; i++ {
+		if lmt.LimitReached(key) {
+			t.Errorf("request %d after the idle expiration should be allowed by the initial tokens", i+1)
+		}
+	}
+}

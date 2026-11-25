@@ -26,6 +26,7 @@ func New(generalExpirableOptions *ExpirableOptions) *Limiter {
 
 	if generalExpirableOptions != nil {
 		lmt.generalExpirableOptions = generalExpirableOptions
+		lmt.applyExpirableOptions(generalExpirableOptions)
 	} else {
 		lmt.generalExpirableOptions = &ExpirableOptions{}
 	}
@@ -40,6 +41,89 @@ func New(generalExpirableOptions *ExpirableOptions) *Limiter {
 	lmt.basicAuthUsers = cache.NewCache[string, bool]().WithTTL(lmt.generalExpirableOptions.DefaultExpirationTTL)
 
 	return lmt
+}
+
+func (l *Limiter) applyExpirableOptions(options *ExpirableOptions) {
+	switch {
+	case options.InitialTokens > 0:
+		l.initialTokens = options.InitialTokens
+		l.initialTokensSet = true
+	case options.InitialQuota > 0:
+		l.initialTokens = options.InitialQuota
+		l.initialTokensSet = true
+	case options.WarmupTokens > 0:
+		l.initialTokens = options.WarmupTokens
+		l.initialTokensSet = true
+	case options.InitialBurst > 0:
+		l.initialTokens = options.InitialBurst
+		l.initialTokensSet = true
+	case options.WarmupBurst > 0:
+		l.initialTokens = options.WarmupBurst
+		l.initialTokensSet = true
+	case options.PrefillTokens > 0:
+		l.initialTokens = options.PrefillTokens
+		l.initialTokensSet = true
+	case options.WarmupStrategy.Tokens > 0:
+		l.initialTokens = options.WarmupStrategy.Tokens
+		l.initialTokensSet = true
+	case options.WarmupStrategy.Initial > 0:
+		l.initialTokens = options.WarmupStrategy.Initial
+		l.initialTokensSet = true
+	case options.WarmupStrategy.Burst > 0:
+		l.initialTokens = options.WarmupStrategy.Burst
+		l.initialTokensSet = true
+	case options.WarmupStrategy.Prefilled > 0:
+		l.initialTokens = options.WarmupStrategy.Prefilled
+		l.initialTokensSet = true
+	}
+
+	switch {
+	case options.RefillInterval > 0:
+		l.refillInterval = options.RefillInterval
+		l.refillIntervalSet = true
+	case options.RecoveryInterval > 0:
+		l.refillInterval = options.RecoveryInterval
+		l.refillIntervalSet = true
+	case options.RefillEvery > 0:
+		l.refillInterval = options.RefillEvery
+		l.refillIntervalSet = true
+	case options.RecoveryStrategy.Interval > 0:
+		l.refillInterval = options.RecoveryStrategy.Interval
+		l.refillIntervalSet = true
+	case options.RecoveryStrategy.Every > 0:
+		l.refillInterval = options.RecoveryStrategy.Every
+		l.refillIntervalSet = true
+	}
+
+	switch {
+	case options.RefillTokens > 0:
+		l.refillTokens = options.RefillTokens
+		l.refillTokensSet = true
+	case options.RecoveryTokens > 0:
+		l.refillTokens = options.RecoveryTokens
+		l.refillTokensSet = true
+	case options.RefillAmount > 0:
+		l.refillTokens = options.RefillAmount
+		l.refillTokensSet = true
+	case options.RecoveryStrategy.Tokens > 0:
+		l.refillTokens = options.RecoveryStrategy.Tokens
+		l.refillTokensSet = true
+	case options.RecoveryStrategy.Amount > 0:
+		l.refillTokens = options.RecoveryStrategy.Amount
+		l.refillTokensSet = true
+	}
+
+	switch {
+	case options.RefillRate > 0:
+		l.refillRate = options.RefillRate
+		l.refillRateSet = true
+	case options.RecoveryRate > 0:
+		l.refillRate = options.RecoveryRate
+		l.refillRateSet = true
+	case options.RecoveryStrategy.Rate > 0:
+		l.refillRate = options.RecoveryStrategy.Rate
+		l.refillRateSet = true
+	}
 }
 
 // IPLookup is a config struct to define how users want to pick the remote IP address.
@@ -61,6 +145,18 @@ type Limiter struct {
 
 	// Limiter burst size
 	burst int
+
+	// Number of tokens available when a bucket is created.
+	initialTokens    int
+	initialTokensSet bool
+
+	// Token refill cadence.
+	refillInterval    time.Duration
+	refillIntervalSet bool
+	refillTokens      int
+	refillTokensSet   bool
+	refillRate        float64
+	refillRateSet     bool
 
 	// HTTP message when limit is reached.
 	message string
@@ -209,6 +305,253 @@ func (l *Limiter) GetBurst() int {
 	defer l.RUnlock()
 
 	return l.burst
+}
+
+// SetInitialTokens is a thread-safe way of setting the number of tokens a new
+// token bucket starts with. The value is clamped to the burst size.
+func (l *Limiter) SetInitialTokens(tokens int) *Limiter {
+	l.Lock()
+	l.initialTokens = tokens
+	l.initialTokensSet = true
+	l.Unlock()
+
+	return l
+}
+
+// GetInitialTokens is a thread-safe way of getting the initial token count.
+func (l *Limiter) GetInitialTokens() int {
+	l.RLock()
+	defer l.RUnlock()
+	return l.initialTokens
+}
+
+// SetInitialQuota is an alias for SetInitialTokens.
+func (l *Limiter) SetInitialQuota(tokens int) *Limiter {
+	return l.SetInitialTokens(tokens)
+}
+
+// GetInitialQuota is an alias for GetInitialTokens.
+func (l *Limiter) GetInitialQuota() int {
+	return l.GetInitialTokens()
+}
+
+// SetWarmupTokens is an alias for SetInitialTokens.
+func (l *Limiter) SetWarmupTokens(tokens int) *Limiter {
+	return l.SetInitialTokens(tokens)
+}
+
+// GetWarmupTokens is an alias for GetInitialTokens.
+func (l *Limiter) GetWarmupTokens() int {
+	return l.GetInitialTokens()
+}
+
+// SetPrefillTokens is an alias for SetInitialTokens.
+func (l *Limiter) SetPrefillTokens(tokens int) *Limiter {
+	return l.SetInitialTokens(tokens)
+}
+
+// GetPrefillTokens is an alias for GetInitialTokens.
+func (l *Limiter) GetPrefillTokens() int {
+	return l.GetInitialTokens()
+}
+
+// SetInitialBurst is an alias for SetInitialTokens.
+func (l *Limiter) SetInitialBurst(tokens int) *Limiter {
+	return l.SetInitialTokens(tokens)
+}
+
+// SetWarmupBurst is an alias for SetInitialTokens.
+func (l *Limiter) SetWarmupBurst(tokens int) *Limiter {
+	return l.SetInitialTokens(tokens)
+}
+
+// SetWarmupStrategy sets the one-time initial token allocation.
+func (l *Limiter) SetWarmupStrategy(strategy WarmupStrategy) *Limiter {
+	initial := strategy.Tokens
+	if initial <= 0 {
+		initial = strategy.Initial
+	}
+	if initial <= 0 {
+		initial = strategy.Burst
+	}
+	if initial <= 0 {
+		initial = strategy.Prefilled
+	}
+	return l.SetInitialTokens(initial)
+}
+
+// GetWarmupStrategy returns the configured one-time initial token allocation.
+func (l *Limiter) GetWarmupStrategy() WarmupStrategy {
+	return WarmupStrategy{Tokens: l.GetInitialTokens()}
+}
+
+// SetTokenBucketInitialTokens is an alias for SetInitialTokens.
+func (l *Limiter) SetTokenBucketInitialTokens(tokens int) *Limiter {
+	return l.SetInitialTokens(tokens)
+}
+
+// GetTokenBucketInitialTokens is an alias for GetInitialTokens.
+func (l *Limiter) GetTokenBucketInitialTokens() int {
+	return l.GetInitialTokens()
+}
+
+// SetRefillInterval is a thread-safe way of setting how often tokens are
+// replenished. A zero value keeps continuous replenishment.
+func (l *Limiter) SetRefillInterval(interval time.Duration) *Limiter {
+	l.Lock()
+	l.refillInterval = interval
+	l.refillIntervalSet = true
+	l.Unlock()
+
+	return l
+}
+
+// GetRefillInterval is a thread-safe way of getting the token refill interval.
+func (l *Limiter) GetRefillInterval() time.Duration {
+	l.RLock()
+	defer l.RUnlock()
+	return l.refillInterval
+}
+
+// SetRecoveryInterval is an alias for SetRefillInterval.
+func (l *Limiter) SetRecoveryInterval(interval time.Duration) *Limiter {
+	return l.SetRefillInterval(interval)
+}
+
+// GetRecoveryInterval is an alias for GetRefillInterval.
+func (l *Limiter) GetRecoveryInterval() time.Duration {
+	return l.GetRefillInterval()
+}
+
+// SetTokenBucketRefillInterval is an alias for SetRefillInterval.
+func (l *Limiter) SetTokenBucketRefillInterval(interval time.Duration) *Limiter {
+	return l.SetRefillInterval(interval)
+}
+
+// GetTokenBucketRefillInterval is an alias for GetRefillInterval.
+func (l *Limiter) GetTokenBucketRefillInterval() time.Duration {
+	return l.GetRefillInterval()
+}
+
+// SetRefillTokens is a thread-safe way of setting how many tokens are added on
+// each refill interval. A zero value derives the amount from the max rate.
+func (l *Limiter) SetRefillTokens(tokens int) *Limiter {
+	l.Lock()
+	l.refillTokens = tokens
+	l.refillTokensSet = true
+	l.Unlock()
+
+	return l
+}
+
+// GetRefillTokens is a thread-safe way of getting tokens added per interval.
+func (l *Limiter) GetRefillTokens() int {
+	l.RLock()
+	defer l.RUnlock()
+	return l.refillTokens
+}
+
+// SetRecoveryTokens is an alias for SetRefillTokens.
+func (l *Limiter) SetRecoveryTokens(tokens int) *Limiter {
+	return l.SetRefillTokens(tokens)
+}
+
+// GetRecoveryTokens is an alias for GetRefillTokens.
+func (l *Limiter) GetRecoveryTokens() int {
+	return l.GetRefillTokens()
+}
+
+// SetTokenBucketRefillTokens is an alias for SetRefillTokens.
+func (l *Limiter) SetTokenBucketRefillTokens(tokens int) *Limiter {
+	return l.SetRefillTokens(tokens)
+}
+
+// GetTokenBucketRefillTokens is an alias for GetRefillTokens.
+func (l *Limiter) GetTokenBucketRefillTokens() int {
+	return l.GetRefillTokens()
+}
+
+// SetRefillRate is a thread-safe way of setting the continuous token refill
+// rate. A zero value uses the configured maximum rate.
+func (l *Limiter) SetRefillRate(rate float64) *Limiter {
+	l.Lock()
+	l.refillRate = rate
+	l.refillRateSet = true
+	l.Unlock()
+
+	return l
+}
+
+// GetRefillRate is a thread-safe way of getting the continuous refill rate.
+func (l *Limiter) GetRefillRate() float64 {
+	l.RLock()
+	defer l.RUnlock()
+	return l.refillRate
+}
+
+// SetRecoveryRate is an alias for SetRefillRate.
+func (l *Limiter) SetRecoveryRate(rate float64) *Limiter {
+	return l.SetRefillRate(rate)
+}
+
+// GetRecoveryRate is an alias for GetRefillRate.
+func (l *Limiter) GetRecoveryRate() float64 {
+	return l.GetRefillRate()
+}
+
+// SetRecoveryStrategy sets the cadence used to replenish depleted buckets.
+func (l *Limiter) SetRecoveryStrategy(strategy RecoveryStrategy) *Limiter {
+	interval := strategy.Interval
+	if interval <= 0 {
+		interval = strategy.Every
+	}
+	if interval > 0 {
+		l.SetRefillInterval(interval)
+	}
+
+	tokens := strategy.Tokens
+	if tokens <= 0 {
+		tokens = strategy.Amount
+	}
+	if tokens > 0 {
+		l.SetRefillTokens(tokens)
+	}
+
+	if strategy.Rate > 0 {
+		l.SetRefillRate(strategy.Rate)
+	}
+	return l
+}
+
+// GetRecoveryStrategy returns the configured refill cadence.
+func (l *Limiter) GetRecoveryStrategy() RecoveryStrategy {
+	l.RLock()
+	defer l.RUnlock()
+	return RecoveryStrategy{
+		Interval: l.refillInterval,
+		Tokens:   l.refillTokens,
+		Rate:     l.refillRate,
+	}
+}
+
+// SetRecoveryPolicy is an alias for SetRecoveryStrategy.
+func (l *Limiter) SetRecoveryPolicy(policy RecoveryPolicy) *Limiter {
+	return l.SetRecoveryStrategy(policy)
+}
+
+// GetRecoveryPolicy is an alias for GetRecoveryStrategy.
+func (l *Limiter) GetRecoveryPolicy() RecoveryPolicy {
+	return l.GetRecoveryStrategy()
+}
+
+// SetRefillPolicy is an alias for SetRecoveryStrategy.
+func (l *Limiter) SetRefillPolicy(policy RefillPolicy) *Limiter {
+	return l.SetRecoveryStrategy(policy)
+}
+
+// SetWarmupPolicy is an alias for SetWarmupStrategy.
+func (l *Limiter) SetWarmupPolicy(policy WarmupPolicy) *Limiter {
+	return l.SetWarmupStrategy(policy)
 }
 
 // SetMessage is thread-safe way of setting HTTP message when limit is reached.
@@ -580,37 +923,71 @@ func (l *Limiter) RemoveContextValuesEntries(contextValue string, entriesForRemo
 	return l
 }
 
-func (l *Limiter) limitReachedWithTokenBucketTTL(key string, tokenBucketTTL time.Duration) bool {
-	lmtMax := l.GetMax()
-	lmtBurst := l.GetBurst()
-	l.Lock()
-	defer l.Unlock()
-
-	if _, found := l.tokenBuckets.Get(key); !found {
-		l.tokenBuckets.Set(
-			key,
-			rate.NewLimiter(rate.Limit(lmtMax), lmtBurst),
-			tokenBucketTTL,
-		)
+func (l *Limiter) allowWithTokenBucketTTL(key string, tokenBucketTTL time.Duration) (bool, int) {
+	l.RLock()
+	lmtMax := l.max
+	lmtBurst := l.burst
+	initialTokens := lmtBurst
+	if l.initialTokensSet {
+		initialTokens = l.initialTokens
 	}
+	keepBucketAlive := l.initialTokensSet
+	cfg := rate.LimiterConfig{InitialTokens: initialTokens, InitialTokensSet: true}
+	if l.refillIntervalSet {
+		cfg.RefillInterval = l.refillInterval
+	}
+	if l.refillTokensSet {
+		cfg.RefillTokens = l.refillTokens
+	}
+	if l.refillRateSet {
+		cfg.RefillRate = rate.Limit(l.refillRate)
+	}
+	l.RUnlock()
 
 	expiringMap, found := l.tokenBuckets.Get(key)
 	if !found {
-		return false
+		l.Lock()
+		expiringMap, found = l.tokenBuckets.Get(key)
+		if !found {
+			expiringMap = rate.NewLimiterWithConfig(rate.Limit(lmtMax), lmtBurst, cfg)
+			l.tokenBuckets.Set(key, expiringMap, tokenBucketTTL)
+		}
+		l.Unlock()
+	} else if keepBucketAlive {
+		// Keep an active bucket from expiring and being re-seeded with its
+		// initial tokens. Initial tokens are only for a genuinely new or idle key.
+		l.tokenBuckets.Set(key, expiringMap, tokenBucketTTL)
 	}
 
-	return !expiringMap.Allow()
+	allowed, tokensLeft := expiringMap.AllowNWithTokens(time.Now(), 1)
+	return !allowed, int(tokensLeft)
 }
 
-// LimitReached returns a bool indicating if the Bucket identified by key ran out of tokens.
-func (l *Limiter) LimitReached(key string) bool {
+func (l *Limiter) limitReachedWithTokenBucketTTL(key string, tokenBucketTTL time.Duration) bool {
+	limitReached, _ := l.allowWithTokenBucketTTL(key, tokenBucketTTL)
+	return limitReached
+}
+
+// LimitReachedAndTokens reports whether the bucket identified by key is
+// exhausted and returns the remaining tokens from the same calculation.
+func (l *Limiter) LimitReachedAndTokens(key string) (bool, int) {
 	ttl := l.GetTokenBucketExpirationTTL()
 
 	if ttl <= 0 {
 		ttl = l.generalExpirableOptions.DefaultExpirationTTL
 	}
 
-	return l.limitReachedWithTokenBucketTTL(key, ttl)
+	return l.allowWithTokenBucketTTL(key, ttl)
+}
+
+// AllowAndTokens is an alias for LimitReachedAndTokens.
+func (l *Limiter) AllowAndTokens(key string) (bool, int) {
+	return l.LimitReachedAndTokens(key)
+}
+
+// LimitReached returns a bool indicating if the Bucket identified by key ran out of tokens.
+func (l *Limiter) LimitReached(key string) bool {
+	return l.limitReachedWithTokenBucketTTL(key, l.tokenBucketTTL())
 }
 
 // Tokens returns current amount of tokens left in the Bucket identified by key.
@@ -621,4 +998,12 @@ func (l *Limiter) Tokens(key string) int {
 	}
 
 	return int(expiringMap.TokensAt(time.Now()))
+}
+
+func (l *Limiter) tokenBucketTTL() time.Duration {
+	ttl := l.GetTokenBucketExpirationTTL()
+	if ttl <= 0 {
+		ttl = l.generalExpirableOptions.DefaultExpirationTTL
+	}
+	return ttl
 }

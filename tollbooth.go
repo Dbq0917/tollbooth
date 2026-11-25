@@ -50,11 +50,13 @@ func LimitByKeys(lmt *limiter.Limiter, keys []string) *errors.HTTPError {
 // LimitByKeysAndReturn keeps track number of request made by keys separated by pipe.
 // It returns HTTPError when limit is exceeded, and also returns the current limit value.
 func LimitByKeysAndReturn(lmt *limiter.Limiter, keys []string) (*errors.HTTPError, int) {
-	if lmt.LimitReached(strings.Join(keys, "|")) {
+	key := strings.Join(keys, "|")
+	limitReached, tokensLeft := lmt.LimitReachedAndTokens(key)
+	if limitReached {
 		return &errors.HTTPError{Message: lmt.GetMessage(), StatusCode: lmt.GetStatusCode()}, 0
 	}
 
-	return nil, lmt.Tokens(strings.Join(keys, "|"))
+	return nil, tokensLeft
 }
 
 // ShouldSkipLimiter is a series of filter that decides if request should be limited or not.

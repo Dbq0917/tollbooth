@@ -129,7 +129,11 @@ func main() {
 3. Header entries and basic auth users can expire over time (to conserve memory).
 
     ```go
-    import "time"
+    import (
+        "time"
+
+        "github.com/didip/tollbooth/v8"
+    )
 
     lmt := tollbooth.NewLimiter(1, nil)
 
@@ -143,7 +147,39 @@ func main() {
     lmt.SetHeaderEntryExpirationTTL(time.Hour)
     ```
 
-4. Upon rejection, the following HTTP response headers are available to users:
+4. Token buckets can start with an initial allocation and recover at a custom cadence.
+
+    ```go
+    import (
+        "time"
+
+        "github.com/didip/tollbooth/v8"
+        "github.com/didip/tollbooth/v8/limiter"
+    )
+
+    lmt := tollbooth.NewLimiter(10, nil)
+
+    // Start each new bucket with 3 tokens instead of a full burst.
+    // The value is clamped to the configured burst size.
+    lmt.SetInitialTokens(3)
+
+    // After the bucket is exhausted, add 2 tokens every 100ms.
+    // If RefillTokens is left unset, the amount is derived from the max rate.
+    lmt.SetRefillInterval(100 * time.Millisecond)
+    lmt.SetRefillTokens(2)
+
+    // The same settings can be supplied when creating the limiter.
+    lmt = tollbooth.NewLimiter(10, &limiter.ExpirableOptions{
+        InitialTokens:  3,
+        RefillInterval: 100 * time.Millisecond,
+        RefillTokens:   2,
+    })
+    ```
+
+    Initial tokens are granted only to a new or idle bucket. An active bucket
+    that keeps exceeding the limit is not re-seeded with the warm-up allocation.
+
+5. Upon rejection, the following HTTP response headers are available to users:
 
     * `X-Rate-Limit-Limit` The maximum request limit.
 
@@ -161,7 +197,7 @@ func main() {
 
    * `RateLimit-Remaining` The remaining tokens.
 
-5. Customize your own message or function when limit is reached.
+6. Customize your own message or function when limit is reached.
 
     ```go
     lmt := tollbooth.NewLimiter(1, nil)
@@ -182,7 +218,7 @@ func main() {
     lmt.SetOnLimitReached(func(w http.ResponseWriter, r *http.Request) { fmt.Println("A request was rejected") })
     ```
 
-6. Tollbooth does not require external storage since it uses an algorithm called [Token Bucket](http://en.wikipedia.org/wiki/Token_bucket) [(Go library: golang.org/x/time/rate)](https://godoc.org/golang.org/x/time/rate).
+7. Tollbooth does not require external storage since it uses an algorithm called [Token Bucket](http://en.wikipedia.org/wiki/Token_bucket) [(Go library: golang.org/x/time/rate)](https://godoc.org/golang.org/x/time/rate).
 
 ## Other Web Frameworks
 
