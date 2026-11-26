@@ -267,6 +267,7 @@ func BuildKeys(lmt *limiter.Limiter, r *http.Request) [][]string {
 
 	sliceKey := []string{remoteIP}
 	if !lmtIgnoreURL {
+		path = lmt.NormalizePath(path)
 		sliceKey = append(sliceKey, path)
 	}
 

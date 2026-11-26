@@ -104,6 +104,12 @@ func main() {
     // Limit only GET and POST requests.
     lmt.SetMethods([]string{"GET", "POST"})
 
+    // Normalize dynamic path segments before they become part of the key.
+    // /users/123 and /users/456 both use the /users/:id bucket, while
+    // /orders/:id remains a separate bucket. Matching is segment-based and
+    // does not run a regular expression for every request.
+    lmt.SetPathTemplates([]string{"/users/:id", "/orders/{id}"})
+
     // Limit based on basic auth usernames.
     // You add them on-load, or later as you handle requests.
     lmt.SetBasicAuthUsers([]string{"bob", "jane", "didip", "vip"})

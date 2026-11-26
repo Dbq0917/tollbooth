@@ -4,6 +4,7 @@ package limiter
 import (
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	cache "github.com/go-pkgz/expirable-cache/v3"
@@ -38,6 +39,16 @@ func New(generalExpirableOptions *ExpirableOptions) *Limiter {
 	lmt.tokenBuckets = cache.NewCache[string, *rate.Limiter]().WithTTL(lmt.generalExpirableOptions.DefaultExpirationTTL)
 
 	lmt.basicAuthUsers = cache.NewCache[string, bool]().WithTTL(lmt.generalExpirableOptions.DefaultExpirationTTL)
+
+	if len(lmt.generalExpirableOptions.PathTemplates) > 0 {
+		lmt.SetPathTemplates(lmt.generalExpirableOptions.PathTemplates)
+	} else if lmt.generalExpirableOptions.PathTemplate != "" {
+		lmt.SetPathTemplate(lmt.generalExpirableOptions.PathTemplate)
+	} else if len(lmt.generalExpirableOptions.PathPatterns) > 0 {
+		lmt.SetPathPatterns(lmt.generalExpirableOptions.PathPatterns)
+	} else if lmt.generalExpirableOptions.PathPattern != "" {
+		lmt.SetPathPattern(lmt.generalExpirableOptions.PathPattern)
+	}
 
 	return lmt
 }
@@ -105,6 +116,10 @@ type Limiter struct {
 
 	// Ignore URL on the rate limiter keys
 	ignoreURL bool
+
+	// Route templates used to normalize dynamic URL segments.
+	pathTemplates       []string
+	pathTemplateMatcher atomic.Pointer[PathTemplateMatcher]
 
 	tokenBucketExpirationTTL  time.Duration
 	basicAuthExpirationTTL    time.Duration

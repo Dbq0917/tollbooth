@@ -11,4 +11,16 @@ type ExpirableOptions struct {
 	// How frequently expire job triggers
 	// Deprecated: not used anymore
 	ExpireJobInterval time.Duration
+
+	// PathTemplates normalizes dynamic path segments before building a key.
+	PathTemplates []string
+
+	// PathTemplate configures a single path template.
+	PathTemplate string
+
+	// PathPatterns is an alternative name for PathTemplates.
+	PathPatterns []string
+
+	// PathPattern is an alternative name for PathTemplate.
+	PathPattern string
 }
