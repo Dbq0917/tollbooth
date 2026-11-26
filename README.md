@@ -184,6 +184,24 @@ func main() {
 
 6. Tollbooth does not require external storage since it uses an algorithm called [Token Bucket](http://en.wikipedia.org/wiki/Token_bucket) [(Go library: golang.org/x/time/rate)](https://godoc.org/golang.org/x/time/rate).
 
+## Request Statistics
+
+Every `LimitReached` decision is counted where the token bucket is consumed. Counts are kept separately from expiring buckets, so deleting expired buckets does not reset them. Reads use atomic counters and are O(1) for both one key and the limiter-wide total; they do not iterate all buckets.
+
+```go
+key := "127.0.0.1|/"
+reached := lmt.LimitReached(key)
+
+keyStats := lmt.Stats(key) // limiter.RequestStats{Allowed: ..., Rejected: ...}
+allStats := lmt.Stats()    // totals across every key
+
+allowed, rejected := lmt.Counts(key)
+totalRequests := lmt.TotalRequests()
+rejectionRate := lmt.RejectionRate(key) // float64 from 0 to 1
+remaining := lmt.Tokens(key)
+hottestKey := lmt.HottestKey() // O(1), maintained on each decision
+```
+
 ## Other Web Frameworks
 
 Sometimes, other frameworks require a little bit of shim to use Tollbooth. These shims below are contributed by the community, so I make no promises on how well they work. The one I am familiar with are: Chi, Gin, and Negroni.

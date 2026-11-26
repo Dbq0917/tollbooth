@@ -103,6 +103,10 @@ type Limiter struct {
 	// Map of limiters with TTL
 	tokenBuckets cache.Cache[string, *rate.Limiter]
 
+	// Cumulative allow/reject statistics. The registry has its own lifetime so
+	// expiring and deleting token buckets does not reset request counts.
+	stats statsRegistry
+
 	// Ignore URL on the rate limiter keys
 	ignoreURL bool
 
@@ -595,11 +599,13 @@ func (l *Limiter) limitReachedWithTokenBucketTTL(key string, tokenBucketTTL time
 	}
 
 	expiringMap, found := l.tokenBuckets.Get(key)
-	if !found {
-		return false
+	limitReached := false
+	if found {
+		limitReached = !expiringMap.Allow()
 	}
+	l.stats.record(key, limitReached)
 
-	return !expiringMap.Allow()
+	return limitReached
 }
 
 // LimitReached returns a bool indicating if the Bucket identified by key ran out of tokens.
